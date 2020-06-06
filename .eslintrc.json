@@ -1,0 +1,42 @@
+{
+  "extends": [
+    "plugin:@typescript-eslint/recommended",
+    "airbnb-typescript",
+    "prettier/@typescript-eslint",
+    "plugin:prettier/recommended",
+    "prettier/standard"
+  ],
+  "plugins": ["@typescript-eslint", "prettier", "jest", "import"],
+  "rules": {
+    "no-console": ["error", { "allow": ["warn", "error"] }],
+    "semi": ["error", "always"],
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/explicit-function-return-type": "off",
+    "import/prefer-default-export": "warn",
+    "react/jsx-no-bind": "error",
+    "react/jsx-no-multiline-js": "off",
+    "react/jsx-boolean-value": "off",
+    "react/jsx-props-no-spreading": "off",
+    "react/jsx-no-target-blank": "error",
+    "react/jsx-pascal-case": "warn",
+    "react/state-in-constructor": "off",
+    "react/destructuring-assignment": "off",
+    "react/prop-types": "off"
+  },
+  "env": {
+    "browser": true,
+    "jasmine": true,
+    "jest": true
+  },
+  "settings": {
+    "react": {
+      "pragma": "React",
+      "version": "detect"
+    }
+  },
+  "parser": "@typescript-eslint/parser",
+  "parserOptions": {
+    "ecmaVersion": 6,
+    "project": "tsconfig.json"
+  }
+}
