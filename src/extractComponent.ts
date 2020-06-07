@@ -11,8 +11,7 @@ import {
     ARROW_FUNCTION_SYNTAX,
     PASCAL_CASE,
 } from "./constants";
-
-type ValidJsx = ts.JsxElement | ts.JsxSelfClosingElement;
+import { parseJsx, findImportsAndProps, ValidJsx, RequiredImportDeclaration } from "./parsers";
 
 function toCamelCase(str: string) {
     return str.replace(str[0], str[0].toLowerCase()).replace(/\//g, "").replace(/\s/g, "");
@@ -52,39 +51,6 @@ function createComponentArrowFunction(componentName: string, jsxElement: ValidJs
             ts.NodeFlags.Const,
         ),
     );
-}
-
-function parseJsx(text: string): ValidJsx | null {
-    const handleExpressionStatement = (expressionStatement: ts.ExpressionStatement) => {
-        switch (expressionStatement.expression.kind) {
-            case ts.SyntaxKind.JsxSelfClosingElement:
-                return expressionStatement.expression;
-            case ts.SyntaxKind.JsxElement: {
-                const jsxElement = expressionStatement.expression as ts.JsxElement;
-                const openingTagName = (jsxElement.openingElement.tagName as ts.Identifier).text;
-                const closingTagName = (jsxElement.closingElement.tagName as ts.Identifier).text;
-                return openingTagName !== "" && closingTagName !== "" ? jsxElement : null;
-            }
-            default:
-                return null;
-        }
-    };
-
-    const handleSyntaxList = (syntaxList: ts.SyntaxList): any => handleNode(syntaxList.getChildAt(0));
-
-    const handleNode = (node: ts.Node): any => {
-        switch (node.kind) {
-            case ts.SyntaxKind.ExpressionStatement:
-                return handleExpressionStatement(node as ts.ExpressionStatement);
-            case ts.SyntaxKind.SyntaxList:
-                return handleSyntaxList(node as ts.SyntaxList);
-            default:
-                return null;
-        }
-    };
-
-    const sourceFile = ts.createSourceFile("temp-source.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
-    return handleNode(sourceFile.getChildAt(0));
 }
 
 function getNewModule(componentName: string, filenameCasing: string) {
@@ -127,6 +93,7 @@ function updateCurrentDocument(selection: vscode.Selection, componentName: strin
 
     return new Promise(resolve =>
         editor?.edit(editBuilder => {
+            // Need to pass props as well
             editBuilder.replace(selection, `<${componentName} />`);
             editBuilder.insert(
                 new vscode.Position(lastImport, 0),
@@ -137,7 +104,14 @@ function updateCurrentDocument(selection: vscode.Selection, componentName: strin
     );
 }
 
-async function createNewModule(component: string, jsxElement: ValidJsx, filename: string, functionSyntax: string) {
+async function createNewModule(options: {
+    component: string;
+    jsxElement: ValidJsx;
+    filename: string;
+    functionSyntax: string;
+    requiredImports: RequiredImportDeclaration[];
+}) {
+    const { component, jsxElement, filename, functionSyntax, requiredImports } = options;
     const func =
         functionSyntax === ARROW_FUNCTION_SYNTAX
             ? createComponentArrowFunction(component, jsxElement)
@@ -149,14 +123,34 @@ async function createNewModule(component: string, jsxElement: ValidJsx, filename
             ts.createImportClause(ts.createIdentifier("React"), undefined),
             ts.createLiteral("react"),
         ),
-    ];
-    const defaultExport = ts.createExportDefault(ts.createIdentifier(component));
+    ].concat(
+        requiredImports.map(({ moduleSpecifier, defaultImport, namedImports }) =>
+            ts.createImportDeclaration(
+                undefined,
+                undefined,
+                ts.createImportClause(
+                    defaultImport ? ts.createIdentifier(defaultImport) : undefined,
+                    namedImports
+                        ? ts.createNamedImports(
+                              namedImports.map(namedImport =>
+                                  ts.createImportSpecifier(undefined, ts.createIdentifier(namedImport)),
+                              ),
+                          )
+                        : undefined,
+                ),
+                ts.createLiteral(moduleSpecifier),
+            ),
+        ),
+    );
 
+    const defaultExport = ts.createExportDefault(ts.createIdentifier(component));
     const newModuleSourceFile = ts.createSourceFile("temp.ts", "", ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
     const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
-    const moduleContent = [...imports, func, defaultExport]
-        .map(node => printer.printNode(ts.EmitHint.Unspecified, node, newModuleSourceFile))
-        .join("\n\n");
+    const moduleContent = [...imports, "", func, "", defaultExport]
+        .map(node =>
+            typeof node === "string" ? node : printer.printNode(ts.EmitHint.Unspecified, node, newModuleSourceFile),
+        )
+        .join("\n");
     const encoder = new TextEncoder();
     await vscode.workspace.fs.writeFile(vscode.Uri.file(filename), encoder.encode(moduleContent));
 }
@@ -180,8 +174,9 @@ export default async () => {
         return;
     }
 
+    const { imports } = findImportsAndProps(editor.document.getText(), jsxElement);
     const { component, componentFilename, filename } = getNewModule(componentName, filenameCasing);
-    await createNewModule(component, jsxElement, filename, functionSyntax);
+    await createNewModule({ component, jsxElement, filename, functionSyntax, requiredImports: imports });
     await updateCurrentDocument(selection, component, componentFilename);
     await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(filename));
     await vscode.commands.executeCommand("workbench.action.files.save");
