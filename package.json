@@ -51,7 +51,7 @@
 				{
 					"when": "resourceLangId == typescriptreact && editorHasSelection",
 					"command": "extract-react-component.extractComponent",
-					"group": "9_cutcopypaste"
+					"group": "1_modification"
 				}
 			]
 		},
