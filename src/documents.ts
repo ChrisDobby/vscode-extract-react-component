@@ -3,12 +3,12 @@ import * as vscode from "vscode";
 import { TextEncoder } from "util";
 import * as fs from "fs";
 import * as path from "path";
-import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE } from "./constants";
+import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE, INTERFACE } from "./constants";
 import { ValidJsx, RequiredImportDeclaration } from "./parsers";
 import { getSourceFile } from "./utils";
 
-function createParameters(propType?: ts.TypeAliasDeclaration) {
-    if (!propType) {
+function createParameters(typeElements: ts.TypeElement[], typeName: string) {
+    if (!typeElements.length) {
         return [];
     }
     return [
@@ -17,12 +17,16 @@ function createParameters(propType?: ts.TypeAliasDeclaration) {
             undefined,
             undefined,
             ts.createObjectBindingPattern(
-                (propType.type as ts.TypeLiteralNode).members.map(member =>
-                    ts.createBindingElement(undefined, undefined, member.name ? (member.name as any).escapedText : ""),
+                typeElements.map(typeElement =>
+                    ts.createBindingElement(
+                        undefined,
+                        undefined,
+                        typeElement.name ? (typeElement.name as any).escapedText : "",
+                    ),
                 ),
             ),
             undefined,
-            ts.createTypeReferenceNode(propType.name.text, undefined),
+            ts.createTypeReferenceNode(typeName, undefined),
         ),
     ];
 }
@@ -63,6 +67,40 @@ function createComponentArrowFunction(
     );
 }
 
+function createInterface(interfaceName: string, typeElements: ts.TypeElement[]) {
+    return ts.createInterfaceDeclaration(undefined, undefined, interfaceName, undefined, undefined, typeElements);
+}
+
+function createType(typeName: string, typeElements: ts.TypeElement[]) {
+    return ts.createTypeAliasDeclaration(
+        undefined,
+        undefined,
+        typeName,
+        undefined,
+        ts.createTypeLiteralNode(typeElements),
+    );
+}
+
+function createDefinitionAndParameters(component: string, props: string[], propsSyntax: string) {
+    if (props.length === 0) {
+        return { propsDefinition: undefined, parameters: [] };
+    }
+
+    const name = `${component}Props`;
+    const typeElements = props.map(prop =>
+        ts.createPropertySignature(
+            undefined,
+            prop,
+            undefined,
+            ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
+            undefined,
+        ),
+    );
+
+    const createFunc = propsSyntax === INTERFACE ? createInterface : createType;
+    return { propsDefinition: createFunc(name, typeElements), parameters: createParameters(typeElements, name) };
+}
+
 export async function createNewModule(options: {
     component: string;
     jsxElement: ValidJsx;
@@ -70,30 +108,10 @@ export async function createNewModule(options: {
     functionSyntax: string;
     requiredImports: RequiredImportDeclaration[];
     props: string[];
+    propsSyntax: string;
 }) {
-    const { component, jsxElement, filename, functionSyntax, requiredImports, props } = options;
-    const propTypeDefinition =
-        props.length > 0
-            ? ts.createTypeAliasDeclaration(
-                  undefined,
-                  undefined,
-                  `${component}Props`,
-                  undefined,
-                  ts.createTypeLiteralNode(
-                      props.map(prop =>
-                          ts.createPropertySignature(
-                              undefined,
-                              prop,
-                              undefined,
-                              ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
-                              undefined,
-                          ),
-                      ),
-                  ),
-              )
-            : undefined;
-
-    const parameters = createParameters(propTypeDefinition);
+    const { component, jsxElement, filename, functionSyntax, requiredImports, props, propsSyntax } = options;
+    const { propsDefinition, parameters } = createDefinitionAndParameters(component, props, propsSyntax);
     const func =
         functionSyntax === ARROW_FUNCTION_SYNTAX
             ? createComponentArrowFunction(component, jsxElement, parameters)
@@ -128,23 +146,13 @@ export async function createNewModule(options: {
     const defaultExport = ts.createExportDefault(ts.createIdentifier(component));
     const newModuleSourceFile = getSourceFile("");
     const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
-    const moduleContent = [
-        ...imports,
-        "",
-        ...(propTypeDefinition ? [propTypeDefinition] : []),
-        "",
-        func,
-        "",
-        defaultExport,
-    ]
+    const moduleContent = [...imports, "", ...(propsDefinition ? [propsDefinition] : []), "", func, "", defaultExport]
         .map(node =>
             typeof node === "string" ? node : printer.printNode(ts.EmitHint.Unspecified, node, newModuleSourceFile),
         )
         .join("\n");
     const encoder = new TextEncoder();
     await vscode.workspace.fs.writeFile(vscode.Uri.file(filename), encoder.encode(moduleContent));
-
-    return propTypeDefinition;
 }
 
 function toCamelCase(str: string) {

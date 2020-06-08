@@ -1,5 +1,11 @@
 import * as vscode from "vscode";
-import { CONFIGURATION_NAME, COMPONENT_NAME, FUNCTION_SYNTAX, FILENAME_CASING } from "./constants";
+import {
+    CONFIGURATION_NAME,
+    COMPONENT_NAME,
+    FUNCTION_SYNTAX,
+    FILENAME_CASING,
+    TYPESCRIPT_PROPS_SYNTAX,
+} from "./constants";
 import { parseJsx, findImportsAndProps } from "./parsers";
 import { createNewModule, getNewModule, updateCurrentDocument } from "./documents";
 
@@ -8,6 +14,7 @@ export default async () => {
     const componentName = config.get(COMPONENT_NAME) as string;
     const functionSyntax = config.get(FUNCTION_SYNTAX) as string;
     const filenameCasing = config.get(FILENAME_CASING) as string;
+    const propsSyntax = config.get(TYPESCRIPT_PROPS_SYNTAX) as string;
 
     const editor = vscode.window.activeTextEditor;
     const selection = editor?.selection;
@@ -32,6 +39,7 @@ export default async () => {
             functionSyntax,
             requiredImports: imports,
             props,
+            propsSyntax,
         }),
         updateCurrentDocument({ selection, componentName: component, componentFilename, props }),
     ]);

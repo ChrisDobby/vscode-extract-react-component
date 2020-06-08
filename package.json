@@ -43,6 +43,15 @@
 					],
 					"default": "camel case",
 					"description": "The casing style to use when creating a new file"
+				},
+				"extractReactComponent.typescriptPropsSyntax": {
+					"type": "string",
+					"enum": [
+						"type",
+						"interface"
+					],
+					"default": "type",
+					"description": "How the props definition in Typescript will be generated"
 				}
 			}
 		},
