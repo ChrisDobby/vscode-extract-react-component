@@ -1,8 +1,5 @@
 import * as ts from "typescript";
-
-function getSourceFile(text: string) {
-    return ts.createSourceFile("temp-source.ts", text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TSX);
-}
+import { getSourceFile } from "./utils";
 
 export type ValidJsx = ts.JsxElement | ts.JsxSelfClosingElement;
 
@@ -92,33 +89,80 @@ export type RequiredImportDeclaration = {
     namedImports: string[];
     moduleSpecifier: string;
 };
-type Declarations = { imports: RequiredImportDeclaration[] };
+
+function flattenedStatement(node: ts.Node): ts.Node[] {
+    switch (node.kind) {
+        case ts.SyntaxKind.ImportDeclaration:
+            return [node];
+        case ts.SyntaxKind.VariableStatement: {
+            const { declarationList } = node as ts.VariableStatement;
+            return ([] as ts.Node[]).concat(...declarationList.declarations.map(flattenedStatement));
+        }
+        case ts.SyntaxKind.VariableDeclaration: {
+            const { initializer } = node as ts.VariableDeclaration;
+            return [node].concat(...(initializer ? flattenedStatement(initializer) : []));
+        }
+        case ts.SyntaxKind.ArrowFunction: {
+            const {
+                body: { statements },
+            } = node as any;
+            return statements ? ([] as ts.Node[]).concat(...statements.map(flattenedStatement)) : [];
+        }
+
+        default:
+            return [];
+    }
+}
+
+type Declarations = { imports: RequiredImportDeclaration[]; variables: string[] };
 function parseOriginal(documentText: string) {
     const getImports = ({ name, namedBindings }: ts.ImportClause) => ({
         defaultImport: name ? name.text : undefined,
         namedImports: namedBindings ? (namedBindings as any).elements.map((element: any) => element.name.text) : [],
     });
-    const statementsReducer = ({ imports }: Declarations, statement: ts.Statement) => {
-        switch (statement.kind) {
+
+    const getVariableNames = (name: ts.BindingName): string[] => {
+        if (name.kind === ts.SyntaxKind.Identifier) {
+            return [name.text];
+        }
+
+        if (name.kind === ts.SyntaxKind.ObjectBindingPattern) {
+            return ([] as string[]).concat(...name.elements.map(({ name }) => getVariableNames(name)));
+        }
+
+        return [];
+    };
+
+    const statementsReducer = ({ imports, variables }: Declarations, node: ts.Node) => {
+        switch (node.kind) {
             case ts.SyntaxKind.ImportDeclaration: {
-                const { importClause, moduleSpecifier } = statement as ts.ImportDeclaration;
+                const { importClause, moduleSpecifier } = node as ts.ImportDeclaration;
                 if (importClause) {
                     return {
                         imports: [
                             ...imports,
                             { moduleSpecifier: (moduleSpecifier as any).text, ...getImports(importClause) },
                         ],
+                        variables,
                     };
                 }
-                return { imports };
+                return { imports, variables };
             }
+
+            case ts.SyntaxKind.VariableDeclaration: {
+                const { name } = node as ts.VariableDeclaration;
+                return { imports, variables: [...variables, ...getVariableNames(name)] };
+            }
+
             default:
-                return { imports };
+                return { imports, variables };
         }
     };
 
-    const sourceFile = getSourceFile(documentText);
-    return sourceFile.statements.reduce(statementsReducer, { imports: [] });
+    const flattenedStatements = ([] as ts.Node[]).concat(
+        ...getSourceFile(documentText).statements.map(flattenedStatement),
+    );
+    return flattenedStatements.reduce(statementsReducer, { imports: [], variables: [] });
 }
 
 export function findImportsAndProps(originalDocumentText: string, jsx: ValidJsx) {
@@ -173,11 +217,13 @@ export function findImportsAndProps(originalDocumentText: string, jsx: ValidJsx)
     };
 
     const jsxIdentifiers = extractIdentifiers(jsx);
-    const { imports } = parseOriginal(originalDocumentText);
+    const { imports, variables } = parseOriginal(originalDocumentText);
 
     const { requiredImports } = jsxIdentifiers.reduce(requiredImportsReducer, {
         requiredImports: [],
     });
+
+    const props = jsxIdentifiers.filter(identifier => variables.includes(identifier));
 
     const fileImportChars = [".", "/"];
     const sortImports = (imp1: RequiredImportDeclaration, imp2: RequiredImportDeclaration) => {
@@ -193,5 +239,5 @@ export function findImportsAndProps(originalDocumentText: string, jsx: ValidJsx)
         return 0;
     };
 
-    return { imports: requiredImports.slice().sort(sortImports) };
+    return { imports: requiredImports.slice().sort(sortImports), props };
 }
