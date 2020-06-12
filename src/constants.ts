@@ -6,3 +6,5 @@ export const ARROW_FUNCTION_SYNTAX = "arrow function";
 export const PASCAL_CASE = "pascal case";
 export const TYPESCRIPT_PROPS_SYNTAX = "typescriptPropsSyntax";
 export const INTERFACE = "interface";
+
+export type JsxProp = { propName: string; initialiser: string };

@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { TextEncoder } from "util";
 import * as fs from "fs";
 import * as path from "path";
-import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE, INTERFACE } from "./constants";
+import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE, INTERFACE, JsxProp } from "./constants";
 import { ValidJsx, RequiredImportDeclaration } from "./parsers";
 import { getSourceFile } from "./utils";
 
@@ -29,6 +29,119 @@ function createParameters(typeElements: ts.TypeElement[], typeName: string) {
             ts.createTypeReferenceNode(typeName, undefined),
         ),
     ];
+}
+
+function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
+    const convertInitialiser = (attribute: ts.JsxAttributeLike) => {
+        if (attribute.kind !== ts.SyntaxKind.JsxAttribute || !attribute.initializer) {
+            return undefined;
+        }
+
+        switch (attribute.initializer.kind) {
+            case ts.SyntaxKind.StringLiteral:
+                return attribute.initializer;
+            case ts.SyntaxKind.JsxExpression:
+                return { ...attribute.initializer, expression: convert(attribute.initializer.expression) };
+        }
+    };
+
+    const convert = (node?: ts.Node): any => {
+        if (!node) {
+            return undefined;
+        }
+
+        switch (node.kind) {
+            case ts.SyntaxKind.JsxSelfClosingElement: {
+                const { tagName, typeArguments, attributes } = node as ts.JsxSelfClosingElement;
+                return ts.createJsxSelfClosingElement(
+                    tagName,
+                    typeArguments,
+                    ts.createJsxAttributes(
+                        attributes.properties.map(prop => ({
+                            ...prop,
+                            initializer: convertInitialiser(prop),
+                        })),
+                    ),
+                );
+            }
+            case ts.SyntaxKind.JsxElement: {
+                const { openingElement, children, closingElement } = node as ts.JsxElement;
+                return ts.createJsxElement(
+                    ts.createJsxOpeningElement(
+                        openingElement.tagName,
+                        openingElement.typeArguments,
+                        ts.createJsxAttributes(
+                            openingElement.attributes.properties.map(prop => ({
+                                ...prop,
+                                initializer: convertInitialiser(prop),
+                            })),
+                        ),
+                    ),
+                    children.map(convert),
+                    closingElement,
+                );
+            }
+
+            case ts.SyntaxKind.TemplateExpression: {
+                const { templateSpans } = node as ts.TemplateExpression;
+                return { ...node, templateSpans: templateSpans.map(convert) as ts.TemplateSpan[] };
+            }
+
+            case ts.SyntaxKind.TemplateSpan: {
+                const { expression } = node as ts.TemplateSpan;
+                return { ...node, expression: convert(expression) };
+            }
+
+            case ts.SyntaxKind.PropertyAccessExpression: {
+                const { name, expression } = node as ts.PropertyAccessExpression;
+                if (
+                    name.kind === ts.SyntaxKind.Identifier &&
+                    expression.kind === ts.SyntaxKind.Identifier &&
+                    props
+                        .map(prop => prop.initialiser)
+                        .includes(`${(expression as any).escapedText}.${(name as any).escapedText}`)
+                ) {
+                    return ts.createIdentifier(name.text);
+                }
+
+                return node;
+            }
+
+            case ts.SyntaxKind.ConditionalExpression: {
+                const { condition, whenTrue, whenFalse } = node as ts.ConditionalExpression;
+                return {
+                    ...node,
+                    condition: convert(condition),
+                    whenTrue: convert(whenTrue),
+                    whenFalse: convert(whenFalse),
+                };
+            }
+
+            case ts.SyntaxKind.BinaryExpression: {
+                const { left, right } = node as ts.BinaryExpression;
+                return { ...node, left: convert(left), right: convert(right) };
+            }
+
+            case ts.SyntaxKind.ParenthesizedExpression: {
+                const { expression } = node as ts.ParenthesizedExpression;
+                return { ...node, expression: convert(expression) };
+            }
+
+            case ts.SyntaxKind.JsxSelfClosingElement:
+            case ts.SyntaxKind.JsxElement:
+                return convert(node);
+
+            case ts.SyntaxKind.JsxExpression: {
+                const { expression, dotDotDotToken } = node as ts.JsxExpression;
+                return ts.createJsxExpression(dotDotDotToken, convert(expression));
+            }
+
+            default:
+                return node;
+        }
+    };
+
+    return convert(jsxElement);
 }
 
 function createComponentFunction(componentName: string, jsxElement: ValidJsx, parameters: ts.ParameterDeclaration[]) {
@@ -81,7 +194,7 @@ function createType(typeName: string, typeElements: ts.TypeElement[]) {
     );
 }
 
-function createDefinitionAndParameters(component: string, props: string[], propsSyntax: string) {
+function createDefinitionAndParameters(component: string, props: JsxProp[], propsSyntax: string) {
     if (props.length === 0) {
         return { propsDefinition: undefined, parameters: [] };
     }
@@ -90,7 +203,7 @@ function createDefinitionAndParameters(component: string, props: string[], props
     const typeElements = props.map(prop =>
         ts.createPropertySignature(
             undefined,
-            prop,
+            prop.propName,
             undefined,
             ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
             undefined,
@@ -107,15 +220,16 @@ export async function createNewModule(options: {
     filename: string;
     functionSyntax: string;
     requiredImports: RequiredImportDeclaration[];
-    props: string[];
+    props: JsxProp[];
     propsSyntax: string;
 }) {
     const { component, jsxElement, filename, functionSyntax, requiredImports, props, propsSyntax } = options;
     const { propsDefinition, parameters } = createDefinitionAndParameters(component, props, propsSyntax);
+    const updatedJsx = updateJsxElement(jsxElement, props);
     const func =
         functionSyntax === ARROW_FUNCTION_SYNTAX
-            ? createComponentArrowFunction(component, jsxElement, parameters)
-            : createComponentFunction(component, jsxElement, parameters);
+            ? createComponentArrowFunction(component, updatedJsx, parameters)
+            : createComponentFunction(component, updatedJsx, parameters);
     const imports = [
         ts.createImportDeclaration(
             undefined,
@@ -192,7 +306,7 @@ export function updateCurrentDocument(options: {
     selection: vscode.Selection;
     componentName: string;
     componentFilename: string;
-    props: string[];
+    props: JsxProp[];
 }) {
     const { selection, componentName, componentFilename, props } = options;
     const editor = vscode.window.activeTextEditor;
@@ -213,8 +327,8 @@ export function updateCurrentDocument(options: {
         ts.createJsxAttributes(
             props.map(prop =>
                 ts.createJsxAttribute(
-                    ts.createIdentifier(prop),
-                    ts.createJsxExpression(undefined, ts.createIdentifier(prop)),
+                    ts.createIdentifier(prop.propName),
+                    ts.createJsxExpression(undefined, ts.createIdentifier(prop.initialiser)),
                 ),
             ),
         ),

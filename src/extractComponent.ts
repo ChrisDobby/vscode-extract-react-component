@@ -29,7 +29,12 @@ export default async () => {
         return;
     }
 
-    const { imports, props } = findImportsAndProps(editor.document.getText(), jsxElement);
+    const { imports, props } = findImportsAndProps({
+        originalDocumentText: editor.document.getText(),
+        jsx: jsxElement,
+        selection,
+    });
+
     const { component, componentFilename, filename } = getNewModule(componentName, filenameCasing);
     await Promise.all([
         createNewModule({
@@ -41,7 +46,12 @@ export default async () => {
             props,
             propsSyntax,
         }),
-        updateCurrentDocument({ selection, componentName: component, componentFilename, props }),
+        updateCurrentDocument({
+            selection,
+            componentName: component,
+            componentFilename,
+            props,
+        }),
     ]);
     await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(filename));
     await vscode.commands.executeCommand("workbench.action.files.save");

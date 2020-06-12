@@ -1,5 +1,7 @@
 import * as ts from "typescript";
+import * as vscode from "vscode";
 import { getSourceFile } from "./utils";
+import { JsxProp } from "./constants";
 
 export type ValidJsx = ts.JsxElement | ts.JsxSelfClosingElement;
 
@@ -36,16 +38,20 @@ export function parseJsx(text: string): ValidJsx | null {
 }
 
 function extractIdentifiers(jsxElement: ValidJsx) {
-    const findIdentifiers = (node: ts.Node): ts.Identifier[] => {
+    const findIdentifiers = (node: ts.Node): JsxProp[] => {
         switch (node.kind) {
             case ts.SyntaxKind.JsxSelfClosingElement: {
                 const { attributes, tagName } = node as ts.JsxSelfClosingElement;
-                return ([tagName] as ts.Identifier[]).concat(...attributes.properties.map(findIdentifiers));
+                const { text } = tagName as any;
+                return ([{ propName: text, initialiser: text }] as JsxProp[]).concat(
+                    ...attributes.properties.map(findIdentifiers),
+                );
             }
             case ts.SyntaxKind.JsxElement: {
                 const { openingElement, children } = node as ts.JsxElement;
                 const nodes = (openingElement.attributes.properties as ts.NodeArray<ts.Node>).concat(children);
-                return ([openingElement.tagName] as ts.Identifier[]).concat(...nodes.map(findIdentifiers));
+                const { text } = openingElement.tagName as any;
+                return ([{ propName: text, initialiser: text }] as JsxProp[]).concat(...nodes.map(findIdentifiers));
             }
             case ts.SyntaxKind.JsxAttribute: {
                 const initialiser = (node as ts.JsxAttribute).initializer;
@@ -59,29 +65,44 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                 return expression ? findIdentifiers(expression) : [];
             }
             case ts.SyntaxKind.TemplateExpression:
-                return ([] as ts.Identifier[]).concat(
-                    ...(node as ts.TemplateExpression).templateSpans.map(findIdentifiers),
-                );
+                return ([] as JsxProp[]).concat(...(node as ts.TemplateExpression).templateSpans.map(findIdentifiers));
             case ts.SyntaxKind.ConditionalExpression: {
                 const { condition, whenTrue, whenFalse } = node as ts.ConditionalExpression;
-                return ([] as ts.Identifier[]).concat(...[condition, whenTrue, whenFalse].map(findIdentifiers));
+                return ([] as JsxProp[]).concat(...[condition, whenTrue, whenFalse].map(findIdentifiers));
             }
             case ts.SyntaxKind.BinaryExpression: {
                 const { left, right } = node as ts.BinaryExpression;
-                return ([] as ts.Identifier[]).concat(...[left, right].map(findIdentifiers));
+                return ([] as JsxProp[]).concat(...[left, right].map(findIdentifiers));
             }
             case ts.SyntaxKind.PropertyAccessExpression: {
                 const { expression, name } = node as ts.PropertyAccessExpression;
-                return ([] as ts.Identifier[]).concat(...[expression, name].map(findIdentifiers));
+                return [
+                    {
+                        propName: name.text,
+                        initialiser: `${findIdentifiers(expression)
+                            .map(ex => ex.propName)
+                            .join(".")}.${name.text}`,
+                    },
+                ];
             }
-            case ts.SyntaxKind.Identifier:
-                return [node as ts.Identifier];
+            case ts.SyntaxKind.Identifier: {
+                const { text } = node as ts.Identifier;
+                return [{ propName: text, initialiser: text }];
+            }
             default:
                 return [];
         }
     };
-    const identifiers = new Set(findIdentifiers(jsxElement).map(identifier => identifier.text));
-    return Array.from(identifiers);
+    return findIdentifiers(jsxElement).reduce(
+        (uniqueIdentifiers, identifier) =>
+            uniqueIdentifiers.find(
+                ({ propName, initialiser }) =>
+                    identifier.propName === propName && initialiser === identifier.initialiser,
+            )
+                ? uniqueIdentifiers
+                : uniqueIdentifiers.concat(identifier),
+        [] as JsxProp[],
+    );
 }
 
 export type RequiredImportDeclaration = {
@@ -115,7 +136,13 @@ function flattenedStatement(node: ts.Node): ts.Node[] {
 }
 
 type Declarations = { imports: RequiredImportDeclaration[]; variables: string[] };
-function parseOriginal(documentText: string) {
+function parseOriginal(documentText: string, selection: vscode.Selection) {
+    const sourceFile = getSourceFile(documentText);
+    const selectionStartPos = sourceFile.getPositionOfLineAndCharacter(selection.start.line, selection.start.character);
+    const selectionEndPos = sourceFile.getPositionOfLineAndCharacter(selection.end.line, selection.end.character);
+
+    const definesTheSelection = (node: ts.Node) => node.pos <= selectionStartPos && node.end >= selectionEndPos;
+
     const getImports = ({ name, namedBindings }: ts.ImportClause) => ({
         defaultImport: name ? name.text : undefined,
         namedImports: namedBindings ? (namedBindings as any).elements.map((element: any) => element.name.text) : [],
@@ -131,6 +158,22 @@ function parseOriginal(documentText: string) {
         }
 
         return [];
+    };
+
+    const getParameters = (variableDeclaration: ts.VariableDeclaration): string[] => {
+        const { initializer } = variableDeclaration;
+        if (
+            !initializer ||
+            !definesTheSelection(variableDeclaration) ||
+            initializer.kind !== ts.SyntaxKind.ArrowFunction
+        ) {
+            return [];
+        }
+
+        const arrowFunctionInitializer = initializer as ts.ArrowFunction;
+        return ([] as string[]).concat(
+            ...arrowFunctionInitializer.parameters.map(param => getVariableNames(param.name)),
+        );
     };
 
     const statementsReducer = ({ imports, variables }: Declarations, node: ts.Node) => {
@@ -150,8 +193,12 @@ function parseOriginal(documentText: string) {
             }
 
             case ts.SyntaxKind.VariableDeclaration: {
-                const { name } = node as ts.VariableDeclaration;
-                return { imports, variables: [...variables, ...getVariableNames(name)] };
+                const variableDeclaration = node as ts.VariableDeclaration;
+                const { name } = variableDeclaration;
+                return {
+                    imports,
+                    variables: [...variables, ...getVariableNames(name), ...getParameters(variableDeclaration)],
+                };
             }
 
             default:
@@ -159,13 +206,16 @@ function parseOriginal(documentText: string) {
         }
     };
 
-    const flattenedStatements = ([] as ts.Node[]).concat(
-        ...getSourceFile(documentText).statements.map(flattenedStatement),
-    );
+    const flattenedStatements = ([] as ts.Node[]).concat(...sourceFile.statements.map(flattenedStatement));
     return flattenedStatements.reduce(statementsReducer, { imports: [], variables: [] });
 }
 
-export function findImportsAndProps(originalDocumentText: string, jsx: ValidJsx) {
+export function findImportsAndProps(options: {
+    originalDocumentText: string;
+    jsx: ValidJsx;
+    selection: vscode.Selection;
+}) {
+    const { originalDocumentText, jsx, selection } = options;
     const requiredImportsReducer = (
         { requiredImports }: { requiredImports: RequiredImportDeclaration[] },
         identifier: string,
@@ -217,13 +267,15 @@ export function findImportsAndProps(originalDocumentText: string, jsx: ValidJsx)
     };
 
     const jsxIdentifiers = extractIdentifiers(jsx);
-    const { imports, variables } = parseOriginal(originalDocumentText);
-
-    const { requiredImports } = jsxIdentifiers.reduce(requiredImportsReducer, {
-        requiredImports: [],
-    });
-
-    const props = jsxIdentifiers.filter(identifier => variables.includes(identifier));
+    const { imports, variables } = parseOriginal(originalDocumentText, selection);
+    const { requiredImports } = ([] as string[])
+        .concat(...jsxIdentifiers.map(identifier => identifier.initialiser.split(".")))
+        .reduce(requiredImportsReducer, {
+            requiredImports: [],
+        });
+    const props = jsxIdentifiers.filter(({ initialiser }) =>
+        variables.find(v => initialiser === v || v === initialiser.substring(0, initialiser.indexOf("."))),
+    );
 
     const fileImportChars = [".", "/"];
     const sortImports = (imp1: RequiredImportDeclaration, imp2: RequiredImportDeclaration) => {
