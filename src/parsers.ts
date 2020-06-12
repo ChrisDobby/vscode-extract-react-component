@@ -130,6 +130,13 @@ function flattenedStatement(node: ts.Node): ts.Node[] {
             return statements ? ([] as ts.Node[]).concat(...statements.map(flattenedStatement)) : [];
         }
 
+        case ts.SyntaxKind.FunctionDeclaration: {
+            const {
+                body: { statements },
+            } = node as any;
+            return statements ? [node].concat(...statements.map(flattenedStatement)) : [node];
+        }
+
         default:
             return [];
     }
@@ -199,6 +206,12 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                     imports,
                     variables: [...variables, ...getVariableNames(name), ...getParameters(variableDeclaration)],
                 };
+            }
+
+            case ts.SyntaxKind.FunctionDeclaration: {
+                const { parameters } = node as ts.FunctionDeclaration;
+                const params = ([] as string[]).concat(...parameters.map(param => getVariableNames(param.name)));
+                return { imports, variables: [...variables, ...params] };
             }
 
             default:
