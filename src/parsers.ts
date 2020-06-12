@@ -80,7 +80,7 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                     {
                         propName: name.text,
                         initialiser: `${findIdentifiers(expression)
-                            .map(ex => ex.propName)
+                            .map(ex => ex.initialiser)
                             .join(".")}.${name.text}`,
                     },
                 ];
@@ -89,10 +89,14 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                 const { text } = node as ts.Identifier;
                 return [{ propName: text, initialiser: text }];
             }
+            case ts.SyntaxKind.ThisKeyword: {
+                return [{ propName: "this", initialiser: "this" }];
+            }
             default:
                 return [];
         }
     };
+
     return findIdentifiers(jsxElement).reduce(
         (uniqueIdentifiers, identifier) =>
             uniqueIdentifiers.find(
@@ -111,37 +115,6 @@ export type RequiredImportDeclaration = {
     moduleSpecifier: string;
 };
 
-function flattenedStatement(node: ts.Node): ts.Node[] {
-    switch (node.kind) {
-        case ts.SyntaxKind.ImportDeclaration:
-            return [node];
-        case ts.SyntaxKind.VariableStatement: {
-            const { declarationList } = node as ts.VariableStatement;
-            return ([] as ts.Node[]).concat(...declarationList.declarations.map(flattenedStatement));
-        }
-        case ts.SyntaxKind.VariableDeclaration: {
-            const { initializer } = node as ts.VariableDeclaration;
-            return [node].concat(...(initializer ? flattenedStatement(initializer) : []));
-        }
-        case ts.SyntaxKind.ArrowFunction: {
-            const {
-                body: { statements },
-            } = node as any;
-            return statements ? ([] as ts.Node[]).concat(...statements.map(flattenedStatement)) : [];
-        }
-
-        case ts.SyntaxKind.FunctionDeclaration: {
-            const {
-                body: { statements },
-            } = node as any;
-            return statements ? [node].concat(...statements.map(flattenedStatement)) : [node];
-        }
-
-        default:
-            return [];
-    }
-}
-
 type Declarations = { imports: RequiredImportDeclaration[]; variables: string[] };
 function parseOriginal(documentText: string, selection: vscode.Selection) {
     const sourceFile = getSourceFile(documentText);
@@ -149,6 +122,64 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
     const selectionEndPos = sourceFile.getPositionOfLineAndCharacter(selection.end.line, selection.end.character);
 
     const definesTheSelection = (node: ts.Node) => node.pos <= selectionStartPos && node.end >= selectionEndPos;
+    const flattenedClassMembers = (classDeclaration: ts.ClassDeclaration) => {
+        if (!definesTheSelection(classDeclaration)) {
+            return [];
+        }
+        const { members } = classDeclaration;
+        return members.reduce((flattenedMembers: any, member: ts.ClassElement) => {
+            if (member.kind !== ts.SyntaxKind.MethodDeclaration || !definesTheSelection(member)) {
+                return flattenedMembers.concat(member);
+            }
+
+            const { body } = member as ts.MethodDeclaration;
+            if (!body || !body.statements) {
+                return flattenedStatement;
+            }
+
+            return flattenedMembers.concat(...body.statements.map(flattenedStatement));
+        }, [] as ts.Node[]);
+    };
+
+    const flattenedStatement = (node: ts.Node): ts.Node[] => {
+        switch (node.kind) {
+            case ts.SyntaxKind.ImportDeclaration:
+                return [node];
+            case ts.SyntaxKind.VariableStatement: {
+                const { declarationList } = node as ts.VariableStatement;
+                return ([] as ts.Node[]).concat(...declarationList.declarations.map(flattenedStatement));
+            }
+            case ts.SyntaxKind.VariableDeclaration: {
+                const { initializer } = node as ts.VariableDeclaration;
+                return [node].concat(...(initializer ? flattenedStatement(initializer) : []));
+            }
+            case ts.SyntaxKind.ArrowFunction: {
+                const {
+                    body: { statements },
+                } = node as any;
+                return statements ? ([] as ts.Node[]).concat(...statements.map(flattenedStatement)) : [];
+            }
+
+            case ts.SyntaxKind.FunctionDeclaration: {
+                if (!definesTheSelection(node)) {
+                    return [];
+                }
+                const {
+                    body: { statements },
+                } = node as any;
+                return statements ? [node].concat(...statements.map(flattenedStatement)) : [node];
+            }
+
+            case ts.SyntaxKind.ClassDeclaration: {
+                return [ts.createProperty(undefined, undefined, "props", undefined, undefined, undefined)].concat(
+                    flattenedClassMembers(node as ts.ClassDeclaration),
+                );
+            }
+
+            default:
+                return [];
+        }
+    };
 
     const getImports = ({ name, namedBindings }: ts.ImportClause) => ({
         defaultImport: name ? name.text : undefined,
@@ -209,9 +240,27 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
             }
 
             case ts.SyntaxKind.FunctionDeclaration: {
+                if (!definesTheSelection(node)) {
+                    return { imports, variables };
+                }
                 const { parameters } = node as ts.FunctionDeclaration;
                 const params = ([] as string[]).concat(...parameters.map(param => getVariableNames(param.name)));
                 return { imports, variables: [...variables, ...params] };
+            }
+
+            case ts.SyntaxKind.PropertyDeclaration: {
+                const {
+                    name: { text },
+                } = node as any;
+                return { imports, variables: [...variables, `this.${text}`] };
+            }
+
+            case ts.SyntaxKind.MethodDeclaration: {
+                const {
+                    name: { text },
+                } = node as any;
+                const methodName = `this.${text}`;
+                return { imports, variables: [...variables, methodName] };
             }
 
             default:
@@ -287,7 +336,7 @@ export function findImportsAndProps(options: {
             requiredImports: [],
         });
     const props = jsxIdentifiers.filter(({ initialiser }) =>
-        variables.find(v => initialiser === v || v === initialiser.substring(0, initialiser.indexOf("."))),
+        variables.find(v => initialiser === v || v === initialiser.substring(0, initialiser.lastIndexOf("."))),
     );
 
     const fileImportChars = [".", "/"];

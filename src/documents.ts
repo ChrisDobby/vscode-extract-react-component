@@ -45,6 +45,20 @@ function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
         }
     };
 
+    const getFullPropertyExpression = (propertyExpression: ts.PropertyAccessExpression): string => {
+        const { name, expression } = propertyExpression;
+        switch (expression.kind) {
+            case ts.SyntaxKind.ThisKeyword:
+                return `this.${name.text}`;
+            case ts.SyntaxKind.Identifier:
+                return `${(expression as ts.Identifier).text}.${name.text}`;
+            case ts.SyntaxKind.PropertyAccessExpression:
+                return `${getFullPropertyExpression(expression as ts.PropertyAccessExpression)}.${name.text}`;
+            default:
+                return name.text;
+        }
+    };
+
     const convert = (node?: ts.Node): any => {
         if (!node) {
             return undefined;
@@ -93,15 +107,10 @@ function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
             }
 
             case ts.SyntaxKind.PropertyAccessExpression: {
-                const { name, expression } = node as ts.PropertyAccessExpression;
-                if (
-                    name.kind === ts.SyntaxKind.Identifier &&
-                    expression.kind === ts.SyntaxKind.Identifier &&
-                    props
-                        .map(prop => prop.initialiser)
-                        .includes(`${(expression as any).escapedText}.${(name as any).escapedText}`)
-                ) {
-                    return ts.createIdentifier(name.text);
+                const propertyAccessExpression = node as ts.PropertyAccessExpression;
+                const fullExpression = `${getFullPropertyExpression(propertyAccessExpression)}`;
+                if (props.map(prop => prop.initialiser).includes(fullExpression)) {
+                    return ts.createIdentifier(propertyAccessExpression.name.text);
                 }
 
                 return node;
