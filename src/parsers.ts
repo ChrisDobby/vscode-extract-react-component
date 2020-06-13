@@ -1,6 +1,6 @@
 import * as ts from "typescript";
 import * as vscode from "vscode";
-import { getSourceFile } from "./utils";
+import { getSourceFile, toCamelCase, toPascalCase } from "./utils";
 import { JsxProp } from "./constants";
 
 export type ValidJsx = ts.JsxElement | ts.JsxSelfClosingElement;
@@ -37,71 +37,98 @@ export function parseJsx(text: string): ValidJsx | null {
     return handleNode(getSourceFile(text).getChildAt(0));
 }
 
+type AttributeInfo = { elementTagName?: string; attributeName?: string };
 function extractIdentifiers(jsxElement: ValidJsx) {
-    const findIdentifiers = (node: ts.Node): JsxProp[] => {
+    const findIdentifiers = (node: ts.Node, attributeInfo: AttributeInfo): JsxProp[] => {
         switch (node.kind) {
             case ts.SyntaxKind.JsxSelfClosingElement: {
                 const { attributes, tagName } = node as ts.JsxSelfClosingElement;
                 const { text } = tagName as any;
-                return ([{ propName: text, initialiser: text }] as JsxProp[]).concat(
-                    ...attributes.properties.map(findIdentifiers),
+                return ([{ propName: text, initialiser: { identifier: text } }] as JsxProp[]).concat(
+                    ...attributes.properties.map(id => findIdentifiers(id, { elementTagName: text })),
                 );
             }
             case ts.SyntaxKind.JsxElement: {
                 const { openingElement, children } = node as ts.JsxElement;
                 const nodes = (openingElement.attributes.properties as ts.NodeArray<ts.Node>).concat(children);
                 const { text } = openingElement.tagName as any;
-                return ([{ propName: text, initialiser: text }] as JsxProp[]).concat(...nodes.map(findIdentifiers));
+                return ([{ propName: text, initialiser: { identifier: text } }] as JsxProp[]).concat(
+                    ...nodes.map(childNode => findIdentifiers(childNode, { elementTagName: text })),
+                );
             }
             case ts.SyntaxKind.JsxAttribute: {
-                const initialiser = (node as ts.JsxAttribute).initializer;
-                return initialiser ? findIdentifiers(initialiser) : [];
+                const { initializer, name } = node as ts.JsxAttribute;
+                return initializer ? findIdentifiers(initializer, { ...attributeInfo, attributeName: name.text }) : [];
             }
             case ts.SyntaxKind.JsxExpression:
             case ts.SyntaxKind.TemplateSpan:
             case ts.SyntaxKind.ParenthesizedExpression:
             case ts.SyntaxKind.JsxSpreadAttribute: {
-                const expression = (node as ts.JsxExpression).expression;
-                return expression ? findIdentifiers(expression) : [];
+                const { expression } = node as ts.JsxExpression;
+                return expression ? findIdentifiers(expression, attributeInfo) : [];
+            }
+            case ts.SyntaxKind.CallExpression: {
+                const { expression, arguments: expressionArgs } = node as ts.CallExpression;
+                if (!expression) {
+                    return [];
+                }
+                const argumentIdentifiers = ([] as JsxProp[])
+                    .concat(...expressionArgs.map(arg => findIdentifiers(arg, {})))
+                    .map(({ propName }) => propName);
+
+                const callIdentifiers = findIdentifiers(expression, {}).map(({ propName, initialiser }) => ({
+                    propName:
+                        attributeInfo.attributeName && attributeInfo.elementTagName
+                            ? `${toCamelCase(attributeInfo.elementTagName)}${toPascalCase(attributeInfo.attributeName)}`
+                            : propName,
+                    initialiser: { identifier: initialiser.identifier, args: argumentIdentifiers },
+                }));
+                return callIdentifiers;
             }
             case ts.SyntaxKind.TemplateExpression:
-                return ([] as JsxProp[]).concat(...(node as ts.TemplateExpression).templateSpans.map(findIdentifiers));
+                return ([] as JsxProp[]).concat(
+                    ...(node as ts.TemplateExpression).templateSpans.map(span => findIdentifiers(span, attributeInfo)),
+                );
             case ts.SyntaxKind.ConditionalExpression: {
                 const { condition, whenTrue, whenFalse } = node as ts.ConditionalExpression;
-                return ([] as JsxProp[]).concat(...[condition, whenTrue, whenFalse].map(findIdentifiers));
+                return ([] as JsxProp[]).concat(
+                    ...[condition, whenTrue, whenFalse].map(exp => findIdentifiers(exp, attributeInfo)),
+                );
             }
             case ts.SyntaxKind.BinaryExpression: {
                 const { left, right } = node as ts.BinaryExpression;
-                return ([] as JsxProp[]).concat(...[left, right].map(findIdentifiers));
+                return ([] as JsxProp[]).concat(...[left, right].map(exp => findIdentifiers(exp, attributeInfo)));
             }
             case ts.SyntaxKind.PropertyAccessExpression: {
                 const { expression, name } = node as ts.PropertyAccessExpression;
                 return [
                     {
                         propName: name.text,
-                        initialiser: `${findIdentifiers(expression)
-                            .map(ex => ex.initialiser)
-                            .join(".")}.${name.text}`,
+                        initialiser: {
+                            identifier: `${findIdentifiers(expression, attributeInfo)
+                                .map(ex => ex.initialiser)
+                                .join(".")}.${name.text}`,
+                        },
                     },
                 ];
             }
             case ts.SyntaxKind.Identifier: {
                 const { text } = node as ts.Identifier;
-                return [{ propName: text, initialiser: text }];
+                return [{ propName: text, initialiser: { identifier: text } }];
             }
             case ts.SyntaxKind.ThisKeyword: {
-                return [{ propName: "this", initialiser: "this" }];
+                return [{ propName: "this", initialiser: { identifier: "this" } }];
             }
             default:
                 return [];
         }
     };
 
-    return findIdentifiers(jsxElement).reduce(
+    return findIdentifiers(jsxElement, {}).reduce(
         (uniqueIdentifiers, identifier) =>
             uniqueIdentifiers.find(
                 ({ propName, initialiser }) =>
-                    identifier.propName === propName && initialiser === identifier.initialiser,
+                    identifier.propName === propName && initialiser.identifier === identifier.initialiser.identifier,
             )
                 ? uniqueIdentifiers
                 : uniqueIdentifiers.concat(identifier),
@@ -326,15 +353,15 @@ export function findImportsAndProps(options: {
         return { requiredImports: updatedImports };
     };
 
-    const jsxIdentifiers = extractIdentifiers(jsx);
+    const jsxIdentifiers = extractIdentifiers(jsx).filter(({ initialiser }) => Boolean(initialiser));
     const { imports, variables } = parseOriginal(originalDocumentText, selection);
     const { requiredImports } = ([] as string[])
-        .concat(...jsxIdentifiers.map(identifier => identifier.initialiser.split(".")))
+        .concat(...jsxIdentifiers.map(identifier => identifier.initialiser.identifier.split(".")))
         .reduce(requiredImportsReducer, {
             requiredImports: [],
         });
-    const props = jsxIdentifiers.filter(({ initialiser }) =>
-        variables.find(v => initialiser === v || v === initialiser.substring(0, initialiser.lastIndexOf("."))),
+    const props = jsxIdentifiers.filter(({ initialiser: { identifier } }) =>
+        variables.find(v => identifier === v || v === identifier.substring(0, identifier.lastIndexOf("."))),
     );
 
     const fileImportChars = [".", "/"];

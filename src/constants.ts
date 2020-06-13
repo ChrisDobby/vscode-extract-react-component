@@ -7,4 +7,5 @@ export const PASCAL_CASE = "pascal case";
 export const TYPESCRIPT_PROPS_SYNTAX = "typescriptPropsSyntax";
 export const INTERFACE = "interface";
 
-export type JsxProp = { propName: string; initialiser: string };
+export type JsxPropInitialiser = { identifier: string; args?: string[] };
+export type JsxProp = { propName: string; initialiser: JsxPropInitialiser };

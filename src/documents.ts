@@ -3,9 +3,9 @@ import * as vscode from "vscode";
 import { TextEncoder } from "util";
 import * as fs from "fs";
 import * as path from "path";
-import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE, INTERFACE, JsxProp } from "./constants";
+import { ARROW_FUNCTION_SYNTAX, PASCAL_CASE, INTERFACE, JsxProp, JsxPropInitialiser } from "./constants";
 import { ValidJsx, RequiredImportDeclaration } from "./parsers";
-import { getSourceFile } from "./utils";
+import { getSourceFile, toCamelCase, toPascalCase } from "./utils";
 
 function createParameters(typeElements: ts.TypeElement[], typeName: string) {
     if (!typeElements.length) {
@@ -109,7 +109,7 @@ function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
             case ts.SyntaxKind.PropertyAccessExpression: {
                 const propertyAccessExpression = node as ts.PropertyAccessExpression;
                 const fullExpression = `${getFullPropertyExpression(propertyAccessExpression)}`;
-                if (props.map(prop => prop.initialiser).includes(fullExpression)) {
+                if (props.map(prop => prop.initialiser.identifier).includes(fullExpression)) {
                     return ts.createIdentifier(propertyAccessExpression.name.text);
                 }
 
@@ -143,6 +143,21 @@ function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
             case ts.SyntaxKind.JsxExpression: {
                 const { expression, dotDotDotToken } = node as ts.JsxExpression;
                 return ts.createJsxExpression(dotDotDotToken, convert(expression));
+            }
+
+            case ts.SyntaxKind.CallExpression: {
+                const { expression } = node as ts.CallExpression;
+                if (expression.kind !== ts.SyntaxKind.Identifier) {
+                    return node;
+                }
+                const prop = props.find(
+                    ({ initialiser: { identifier } }) => identifier === (expression as ts.Identifier).text,
+                );
+                if (!prop) {
+                    return node;
+                }
+
+                return ts.createIdentifier(prop.propName);
             }
 
             default:
@@ -278,14 +293,6 @@ export async function createNewModule(options: {
     await vscode.workspace.fs.writeFile(vscode.Uri.file(filename), encoder.encode(moduleContent));
 }
 
-function toCamelCase(str: string) {
-    return str.replace(str[0], str[0].toLowerCase()).replace(/\//g, "").replace(/\s/g, "");
-}
-
-function toPascalCase(str: string) {
-    return str.replace(str[0], str[0].toUpperCase()).replace(/\//g, "").replace(/\s/g, "");
-}
-
 export function getNewModule(componentName: string, filenameCasing: string) {
     const currentFileUri = vscode.window.activeTextEditor?.document.uri;
     const fileUri = currentFileUri as vscode.Uri;
@@ -330,14 +337,26 @@ export function updateCurrentDocument(options: {
             : []),
     );
 
+    const createAttributeExpression = ({ identifier, args }: JsxPropInitialiser) => {
+        if (!args) {
+            return ts.createIdentifier(identifier);
+        }
+
+        return ts.createCall(
+            ts.createIdentifier(identifier),
+            undefined,
+            args.map(arg => ts.createIdentifier(arg)),
+        );
+    };
+
     const jsxElement = ts.createJsxSelfClosingElement(
         ts.createIdentifier(componentName),
         undefined,
         ts.createJsxAttributes(
-            props.map(prop =>
+            props.map(({ propName, initialiser }) =>
                 ts.createJsxAttribute(
-                    ts.createIdentifier(prop.propName),
-                    ts.createJsxExpression(undefined, ts.createIdentifier(prop.initialiser)),
+                    ts.createIdentifier(propName),
+                    ts.createJsxExpression(undefined, createAttributeExpression(initialiser)),
                 ),
             ),
         ),
