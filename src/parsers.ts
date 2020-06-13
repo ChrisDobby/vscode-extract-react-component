@@ -160,7 +160,8 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                 return statements ? ([] as ts.Node[]).concat(...statements.map(flattenedStatement)) : [];
             }
 
-            case ts.SyntaxKind.FunctionDeclaration: {
+            case ts.SyntaxKind.FunctionDeclaration:
+            case ts.SyntaxKind.FunctionExpression: {
                 if (!definesTheSelection(node)) {
                     return [];
                 }
@@ -199,19 +200,16 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
     };
 
     const getParameters = (variableDeclaration: ts.VariableDeclaration): string[] => {
+        const functionKinds = [ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression];
         const { initializer } = variableDeclaration;
-        if (
-            !initializer ||
-            !definesTheSelection(variableDeclaration) ||
-            initializer.kind !== ts.SyntaxKind.ArrowFunction
-        ) {
+        if (!initializer || !definesTheSelection(variableDeclaration) || !functionKinds.includes(initializer.kind)) {
             return [];
         }
 
-        const arrowFunctionInitializer = initializer as ts.ArrowFunction;
-        return ([] as string[]).concat(
-            ...arrowFunctionInitializer.parameters.map(param => getVariableNames(param.name)),
-        );
+        const functionInitializer = initializer as ts.ArrowFunction | ts.FunctionExpression;
+        return functionInitializer.parameters
+            ? ([] as string[]).concat(...functionInitializer.parameters.map(param => getVariableNames(param.name)))
+            : [];
     };
 
     const statementsReducer = ({ imports, variables }: Declarations, node: ts.Node) => {
