@@ -14,7 +14,9 @@ export function parseJsx(text: string): ValidJsx | null {
                 const jsxElement = expressionStatement.expression as ts.JsxElement;
                 const openingTagName = (jsxElement.openingElement.tagName as ts.Identifier).text;
                 const closingTagName = (jsxElement.closingElement.tagName as ts.Identifier).text;
-                return openingTagName !== "" && closingTagName !== "" ? jsxElement : null;
+                return openingTagName !== "" && closingTagName !== "" && openingTagName === closingTagName
+                    ? jsxElement
+                    : null;
             }
             default:
                 return null;
@@ -27,8 +29,10 @@ export function parseJsx(text: string): ValidJsx | null {
         switch (node.kind) {
             case ts.SyntaxKind.ExpressionStatement:
                 return handleExpressionStatement(node as ts.ExpressionStatement);
-            case ts.SyntaxKind.SyntaxList:
-                return handleSyntaxList(node as ts.SyntaxList);
+            case ts.SyntaxKind.SyntaxList: {
+                const syntaxList = node as ts.SyntaxList;
+                return syntaxList._children.length === 1 ? handleSyntaxList(node as ts.SyntaxList) : null;
+            }
             default:
                 return null;
         }

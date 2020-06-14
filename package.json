@@ -10,7 +10,8 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onCommand:extract-react-component.extractComponent"
+		"onLanguage:typescript",
+		"onLanguage:typescriptreact"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
@@ -54,22 +55,7 @@
 					"description": "How the props definition in Typescript will be generated"
 				}
 			}
-		},
-		"menus": {
-			"editor/context": [
-				{
-					"when": "resourceLangId == typescriptreact && editorHasSelection",
-					"command": "extract-react-component.extractComponent",
-					"group": "1_modification"
-				}
-			]
-		},
-		"commands": [
-			{
-				"command": "extract-react-component.extractComponent",
-				"title": "Extract Component"
-			}
-		]
+		}
 	},
 	"scripts": {
 		"vscode:prepublish": "yarn run compile",

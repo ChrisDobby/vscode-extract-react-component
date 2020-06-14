@@ -9,3 +9,5 @@ export const INTERFACE = "interface";
 
 export type JsxPropInitialiser = { identifier: string; args?: string[] };
 export type JsxProp = { propName: string; initialiser: JsxPropInitialiser };
+
+export const EXTRACT_REACT_COMPONENT_COMMAND = "extract-react-component.extractComponent";
