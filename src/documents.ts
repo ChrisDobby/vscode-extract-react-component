@@ -225,13 +225,7 @@ function createDefinitionAndParameters(component: string, props: JsxProp[], prop
 
     const name = `${component}Props`;
     const typeElements = props.map(prop =>
-        ts.createPropertySignature(
-            undefined,
-            prop.propName,
-            undefined,
-            ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword),
-            undefined,
-        ),
+        ts.createPropertySignature(undefined, prop.propName, undefined, prop.type, undefined),
     );
 
     const createFunc = propsSyntax === INTERFACE ? createInterface : createType;

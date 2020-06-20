@@ -1,7 +1,7 @@
 import * as ts from "typescript";
 import * as vscode from "vscode";
 import { getSourceFile, toCamelCase, toPascalCase } from "./utils";
-import { JsxProp } from "./constants";
+import { JsxProp, JsxPropInitialiser } from "./constants";
 
 export type ValidJsx = ts.JsxElement | ts.JsxSelfClosingElement;
 
@@ -42,13 +42,14 @@ export function parseJsx(text: string): ValidJsx | null {
 }
 
 type AttributeInfo = { elementTagName?: string; attributeName?: string };
+type JsxIdentifier = { propName: string; initialiser: JsxPropInitialiser };
 function extractIdentifiers(jsxElement: ValidJsx) {
-    const findIdentifiers = (node: ts.Node, attributeInfo: AttributeInfo): JsxProp[] => {
+    const findIdentifiers = (node: ts.Node, attributeInfo: AttributeInfo): JsxIdentifier[] => {
         switch (node.kind) {
             case ts.SyntaxKind.JsxSelfClosingElement: {
                 const { attributes, tagName } = node as ts.JsxSelfClosingElement;
                 const { text } = tagName as any;
-                return ([{ propName: text, initialiser: { identifier: text } }] as JsxProp[]).concat(
+                return ([{ propName: text, initialiser: { identifier: text } }] as JsxIdentifier[]).concat(
                     ...attributes.properties.map(id => findIdentifiers(id, { elementTagName: text })),
                 );
             }
@@ -56,7 +57,7 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                 const { openingElement, children } = node as ts.JsxElement;
                 const nodes = (openingElement.attributes.properties as ts.NodeArray<ts.Node>).concat(children);
                 const { text } = openingElement.tagName as any;
-                return ([{ propName: text, initialiser: { identifier: text } }] as JsxProp[]).concat(
+                return ([{ propName: text, initialiser: { identifier: text } }] as JsxIdentifier[]).concat(
                     ...nodes.map(childNode => findIdentifiers(childNode, { elementTagName: text })),
                 );
             }
@@ -76,7 +77,7 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                 if (!expression) {
                     return [];
                 }
-                const argumentIdentifiers = ([] as JsxProp[])
+                const argumentIdentifiers = ([] as JsxIdentifier[])
                     .concat(...expressionArgs.map(arg => findIdentifiers(arg, {})))
                     .map(({ propName }) => propName);
 
@@ -90,18 +91,18 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                 return callIdentifiers;
             }
             case ts.SyntaxKind.TemplateExpression:
-                return ([] as JsxProp[]).concat(
+                return ([] as JsxIdentifier[]).concat(
                     ...(node as ts.TemplateExpression).templateSpans.map(span => findIdentifiers(span, attributeInfo)),
                 );
             case ts.SyntaxKind.ConditionalExpression: {
                 const { condition, whenTrue, whenFalse } = node as ts.ConditionalExpression;
-                return ([] as JsxProp[]).concat(
+                return ([] as JsxIdentifier[]).concat(
                     ...[condition, whenTrue, whenFalse].map(exp => findIdentifiers(exp, attributeInfo)),
                 );
             }
             case ts.SyntaxKind.BinaryExpression: {
                 const { left, right } = node as ts.BinaryExpression;
-                return ([] as JsxProp[]).concat(...[left, right].map(exp => findIdentifiers(exp, attributeInfo)));
+                return ([] as JsxIdentifier[]).concat(...[left, right].map(exp => findIdentifiers(exp, attributeInfo)));
             }
             case ts.SyntaxKind.PropertyAccessExpression: {
                 const { expression, name } = node as ts.PropertyAccessExpression;
@@ -110,7 +111,7 @@ function extractIdentifiers(jsxElement: ValidJsx) {
                         propName: name.text,
                         initialiser: {
                             identifier: `${findIdentifiers(expression, attributeInfo)
-                                .map(ex => ex.initialiser)
+                                .map(ex => ex.initialiser.identifier)
                                 .join(".")}.${name.text}`,
                         },
                     },
@@ -136,7 +137,51 @@ function extractIdentifiers(jsxElement: ValidJsx) {
             )
                 ? uniqueIdentifiers
                 : uniqueIdentifiers.concat(identifier),
-        [] as JsxProp[],
+        [] as JsxIdentifier[],
+    );
+}
+
+function createProgram(
+    files: {
+        fileName: string;
+        content: string;
+        sourceFile?: ts.SourceFile;
+    }[],
+    compilerOptions?: ts.CompilerOptions,
+): ts.Program {
+    const tsConfigJson = ts.parseConfigFileTextToJson(
+        "tsconfig.json",
+        compilerOptions
+            ? JSON.stringify(compilerOptions)
+            : `{
+      "compilerOptions": {
+        "target": "es6",
+        "module": "commonjs",
+        "lib": ["es6"],
+        "rootDir": ".",
+        "strict": false
+      }
+    `,
+    );
+    let { options, errors } = ts.convertCompilerOptionsFromJson(tsConfigJson.config.compilerOptions, ".");
+    if (errors.length) {
+        throw errors;
+    }
+    const compilerHost = ts.createCompilerHost(options);
+    compilerHost.getSourceFile = (fileName: string) => {
+        const file = files.find(f => f.fileName === fileName);
+        if (!file) return undefined;
+        file.sourceFile =
+            file.sourceFile ||
+            ts.createSourceFile(fileName, file.content, ts.ScriptTarget.ES2015, false, ts.ScriptKind.TSX);
+        return file.sourceFile;
+    };
+
+    compilerHost.resolveTypeReferenceDirectives = () => [];
+    return ts.createProgram(
+        files.map(f => f.fileName),
+        options,
+        compilerHost,
     );
 }
 
@@ -146,13 +191,14 @@ export type RequiredImportDeclaration = {
     moduleSpecifier: string;
 };
 
-type Declarations = { imports: RequiredImportDeclaration[]; variables: string[] };
-function parseOriginal(documentText: string, selection: vscode.Selection) {
-    const sourceFile = getSourceFile(documentText);
+type VariableDeclaration = { name: string; type?: ts.Type };
+type Declarations = { imports: RequiredImportDeclaration[]; variables: VariableDeclaration[] };
+function parseOriginal(sourceFile: ts.SourceFile, typechecker: ts.TypeChecker, selection: vscode.Selection) {
     const selectionStartPos = sourceFile.getPositionOfLineAndCharacter(selection.start.line, selection.start.character);
     const selectionEndPos = sourceFile.getPositionOfLineAndCharacter(selection.end.line, selection.end.character);
 
     const definesTheSelection = (node: ts.Node) => node.pos <= selectionStartPos && node.end >= selectionEndPos;
+
     const flattenedClassMembers = (classDeclaration: ts.ClassDeclaration) => {
         if (!definesTheSelection(classDeclaration)) {
             return [];
@@ -181,7 +227,7 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                 return ([] as ts.Node[]).concat(...declarationList.declarations.map(flattenedStatement));
             }
             case ts.SyntaxKind.VariableDeclaration: {
-                const { initializer } = node as ts.VariableDeclaration;
+                const { initializer, type } = node as ts.VariableDeclaration;
                 return [node].concat(...(initializer ? flattenedStatement(initializer) : []));
             }
             case ts.SyntaxKind.ArrowFunction: {
@@ -218,19 +264,19 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
         namedImports: namedBindings ? (namedBindings as any).elements.map((element: any) => element.name.text) : [],
     });
 
-    const getVariableNames = (name: ts.BindingName): string[] => {
+    const getVariableNames = (name: ts.BindingName): VariableDeclaration[] => {
         if (name.kind === ts.SyntaxKind.Identifier) {
-            return [name.text];
+            return [{ name: name.text, type: typechecker.getTypeAtLocation(name) }];
         }
 
         if (name.kind === ts.SyntaxKind.ObjectBindingPattern) {
-            return ([] as string[]).concat(...name.elements.map(({ name }) => getVariableNames(name)));
+            return ([] as VariableDeclaration[]).concat(...name.elements.map(({ name }) => getVariableNames(name)));
         }
 
         return [];
     };
 
-    const getParameters = (variableDeclaration: ts.VariableDeclaration): string[] => {
+    const getParameters = (variableDeclaration: ts.VariableDeclaration): VariableDeclaration[] => {
         const functionKinds = [ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.FunctionExpression];
         const { initializer } = variableDeclaration;
         if (!initializer || !definesTheSelection(variableDeclaration) || !functionKinds.includes(initializer.kind)) {
@@ -239,7 +285,9 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
 
         const functionInitializer = initializer as ts.ArrowFunction | ts.FunctionExpression;
         return functionInitializer.parameters
-            ? ([] as string[]).concat(...functionInitializer.parameters.map(param => getVariableNames(param.name)))
+            ? ([] as VariableDeclaration[]).concat(
+                  ...functionInitializer.parameters.map(param => getVariableNames(param.name)),
+              )
             : [];
     };
 
@@ -273,7 +321,9 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                     return { imports, variables };
                 }
                 const { parameters } = node as ts.FunctionDeclaration;
-                const params = ([] as string[]).concat(...parameters.map(param => getVariableNames(param.name)));
+                const params = ([] as VariableDeclaration[]).concat(
+                    ...parameters.map(param => getVariableNames(param.name)),
+                );
                 return { imports, variables: [...variables, ...params] };
             }
 
@@ -281,7 +331,7 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                 const {
                     name: { text },
                 } = node as any;
-                return { imports, variables: [...variables, `this.${text}`] };
+                return { imports, variables: [...variables, { name: `this.${text}` }] };
             }
 
             case ts.SyntaxKind.MethodDeclaration: {
@@ -289,7 +339,7 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
                     name: { text },
                 } = node as any;
                 const methodName = `this.${text}`;
-                return { imports, variables: [...variables, methodName] };
+                return { imports, variables: [...variables, { name: methodName }] };
             }
 
             default:
@@ -299,6 +349,14 @@ function parseOriginal(documentText: string, selection: vscode.Selection) {
 
     const flattenedStatements = ([] as ts.Node[]).concat(...sourceFile.statements.map(flattenedStatement));
     return flattenedStatements.reduce(statementsReducer, { imports: [], variables: [] });
+}
+
+function createTypeNode(typechecker: ts.TypeChecker, type?: ts.Type): ts.TypeNode {
+    if (!type) {
+        return ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword);
+    }
+
+    return typechecker.typeToTypeNode(type) || ts.createKeywordTypeNode(ts.SyntaxKind.AnyKeyword);
 }
 
 export function findImportsAndProps(options: {
@@ -358,15 +416,25 @@ export function findImportsAndProps(options: {
     };
 
     const jsxIdentifiers = extractIdentifiers(jsx).filter(({ initialiser }) => Boolean(initialiser));
-    const { imports, variables } = parseOriginal(originalDocumentText, selection);
+    const program = createProgram([{ fileName: "temp.ts", content: originalDocumentText }]);
+    const [sourceFile] = program.getSourceFiles();
+    const typechecker = program.getTypeChecker();
+
+    const { imports, variables } = parseOriginal(sourceFile, typechecker, selection);
     const { requiredImports } = ([] as string[])
         .concat(...jsxIdentifiers.map(identifier => identifier.initialiser.identifier.split(".")))
         .reduce(requiredImportsReducer, {
             requiredImports: [],
         });
-    const props = jsxIdentifiers.filter(({ initialiser: { identifier } }) =>
-        variables.find(v => identifier === v || v === identifier.substring(0, identifier.lastIndexOf("."))),
-    );
+    const props = jsxIdentifiers.reduce((propsWithTypes, identifier) => {
+        const identifierName = identifier.initialiser.identifier;
+        const variable = variables.find(
+            v => identifierName === v.name || v.name === identifierName.substring(0, identifierName.lastIndexOf(".")),
+        );
+        return variable
+            ? [...propsWithTypes, { ...identifier, type: createTypeNode(typechecker, variable.type) }]
+            : propsWithTypes;
+    }, [] as JsxProp[]);
 
     const fileImportChars = [".", "/"];
     const sortImports = (imp1: RequiredImportDeclaration, imp2: RequiredImportDeclaration) => {
