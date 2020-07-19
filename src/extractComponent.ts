@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as ts from "typescript";
 import {
     CONFIGURATION_NAME,
     COMPONENT_NAME,
@@ -8,6 +9,50 @@ import {
 } from "./constants";
 import { parseJsx, findImportsAndProps } from "./parsers";
 import { createNewModule, getNewModule, updateCurrentDocument } from "./documents";
+
+function createProgram(
+    files: {
+        fileName: string;
+        content: string;
+        sourceFile?: ts.SourceFile;
+    }[],
+    compilerOptions?: ts.CompilerOptions,
+): ts.Program {
+    const tsConfigJson = ts.parseConfigFileTextToJson(
+        "tsconfig.json",
+        compilerOptions
+            ? JSON.stringify(compilerOptions)
+            : `{
+      "compilerOptions": {
+        "target": "es6",
+        "module": "commonjs",
+        "lib": ["es6"],
+        "rootDir": ".",
+        "strict": false
+      }
+    `,
+    );
+    let { options, errors } = ts.convertCompilerOptionsFromJson(tsConfigJson.config.compilerOptions, ".");
+    if (errors.length) {
+        throw errors;
+    }
+    const compilerHost = ts.createCompilerHost(options);
+    compilerHost.getSourceFile = (fileName: string) => {
+        const file = files.find(f => f.fileName === fileName);
+        if (!file) return undefined;
+        file.sourceFile =
+            file.sourceFile ||
+            ts.createSourceFile(fileName, file.content, ts.ScriptTarget.ES2015, false, ts.ScriptKind.TSX);
+        return file.sourceFile;
+    };
+
+    compilerHost.resolveTypeReferenceDirectives = () => [];
+    return ts.createProgram(
+        files.map(f => f.fileName),
+        options,
+        compilerHost,
+    );
+}
 
 export default async () => {
     const config = vscode.workspace.getConfiguration(CONFIGURATION_NAME);
@@ -29,11 +74,17 @@ export default async () => {
         return;
     }
 
-    const { imports, props } = findImportsAndProps({
-        originalDocumentText: editor.document.getText(),
+    const program = createProgram([{ fileName: "temp.ts", content: editor.document.getText() }]);
+    const { imports, props, jsxDefinedIn, originalElement } = findImportsAndProps({
+        program,
         jsx: jsxElement,
         selection,
     });
+
+    if (originalElement === null) {
+        vscode.window.showErrorMessage("Error parsing the file");
+        return;
+    }
 
     const { component, componentFilename, filename } = getNewModule(componentName, filenameCasing);
     await Promise.all([
@@ -47,10 +98,12 @@ export default async () => {
             propsSyntax,
         }),
         updateCurrentDocument({
-            selection,
             componentName: component,
             componentFilename,
             props,
+            jsxDefinedIn,
+            program,
+            originalElement,
         }),
     ]);
     await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(filename));

@@ -31,7 +31,25 @@ function createParameters(typeElements: ts.TypeElement[], typeName: string) {
     ];
 }
 
+function getFunctionsToCreate(props: JsxProp[]) {
+    return props.filter(({ initialiser: { expression } }) => Boolean(expression)).map(({ initialiser }) => initialiser);
+}
+
 function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
+    const functionsToCreate = getFunctionsToCreate(props);
+    const getDerivedInitialiser = (property: ts.JsxAttributeLike) => {
+        const { name } = property;
+        const functionToCreate = functionsToCreate.find(
+            func => name && name.kind === ts.SyntaxKind.Identifier && name.text === func.originalAttributeName,
+        );
+
+        if (!functionToCreate) {
+            return undefined;
+        }
+
+        return ts.createJsxExpression(undefined, ts.createIdentifier(functionToCreate.identifier));
+    };
+
     const convertInitialiser = (attribute: ts.JsxAttributeLike) => {
         if (attribute.kind !== ts.SyntaxKind.JsxAttribute || !attribute.initializer) {
             return undefined;
@@ -73,7 +91,7 @@ function updateJsxElement(jsxElement: ValidJsx, props: JsxProp[]) {
                     ts.createJsxAttributes(
                         attributes.properties.map(prop => ({
                             ...prop,
-                            initializer: convertInitialiser(prop),
+                            initializer: getDerivedInitialiser(prop) || convertInitialiser(prop),
                         })),
                     ),
                 );
@@ -312,13 +330,80 @@ export function getNewModule(componentName: string, filenameCasing: string) {
     };
 }
 
+function addStatements(nodeToAddTo: ts.Node, props: JsxProp[]) {
+    const toAdd = props
+        .map(({ initialiser: { expression, identifier } }) => (expression ? { expression, identifier } : null))
+        .filter(Boolean) as any[];
+    if (!toAdd.length) {
+        return nodeToAddTo;
+    }
+
+    const statementsToAdd = toAdd.map(({ identifier, expression }) =>
+        ts.createVariableDeclarationList(
+            [ts.createVariableDeclaration(identifier, undefined, expression)],
+            ts.NodeFlags.Const,
+        ),
+    );
+    const getUpdatedStatements = (node: ts.Node): ts.Statement[] => {
+        switch (node.kind) {
+            case ts.SyntaxKind.VariableDeclaration: {
+                const { initializer } = node as ts.VariableDeclaration;
+                return initializer ? getUpdatedStatements(initializer) : [];
+            }
+
+            case ts.SyntaxKind.ArrowFunction: {
+                const { body } = node as ts.ArrowFunction;
+                return getUpdatedStatements(body);
+            }
+
+            case ts.SyntaxKind.FunctionDeclaration:
+            case ts.SyntaxKind.FunctionExpression: {
+                const { body } = node as ts.FunctionDeclaration;
+                return body ? getUpdatedStatements(body) : [];
+            }
+
+            case ts.SyntaxKind.Block: {
+                const { statements } = node as ts.Block;
+                return [...statementsToAdd, ...statements] as ts.Statement[];
+            }
+            case ts.SyntaxKind.JsxExpression:
+            case ts.SyntaxKind.ParenthesizedExpression: {
+                const { expression } = node as ts.JsxExpression;
+                const returnStatement = [ts.createReturn(expression)];
+                return [...statementsToAdd, ...returnStatement] as ts.Statement[];
+            }
+
+            default:
+                return [];
+        }
+    };
+
+    const addStatementsToNode = (statements: ts.Statement[]) => {
+        if ((nodeToAddTo as any).initializer) {
+            return {
+                ...nodeToAddTo,
+                initializer: { ...(nodeToAddTo as any).initializer, body: ts.createBlock(statements, true) },
+            };
+        }
+
+        return { ...nodeToAddTo, body: ts.createBlock(statements, true) };
+    };
+
+    const updatedStatements = getUpdatedStatements(nodeToAddTo);
+    const withAddedStatements = addStatementsToNode(updatedStatements);
+
+    return withAddedStatements;
+}
+
 export function updateCurrentDocument(options: {
-    selection: vscode.Selection;
     componentName: string;
     componentFilename: string;
     props: JsxProp[];
+    jsxDefinedIn: ts.Node;
+    program: ts.Program;
+    originalElement: ts.JsxElement | ts.JsxSelfClosingElement;
 }) {
-    const { selection, componentName, componentFilename, props } = options;
+    const { componentName, componentFilename, props, jsxDefinedIn, program, originalElement } = options;
     const editor = vscode.window.activeTextEditor;
     const currentText = editor?.document.getText();
     const lines = currentText?.split("\n");
@@ -362,14 +447,22 @@ export function updateCurrentDocument(options: {
         ts.createImportClause(ts.createIdentifier(componentName), undefined),
         ts.createLiteral(`./${componentFilename}`),
     );
+    (originalElement as any).parent.expression = jsxElement;
+    const start = editor?.document.positionAt(jsxDefinedIn.pos);
+    const end = editor?.document.positionAt(jsxDefinedIn.end);
+    const definedInSelection = new vscode.Range(
+        new vscode.Position(start?.line as number, start?.character as number),
+        new vscode.Position(end?.line as number, end?.character as number),
+    );
+    const updatedDefinedIn = addStatements(jsxDefinedIn, props);
 
+    const [sourceFile] = program.getSourceFiles();
     const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
-    const jsxText = printer.printNode(ts.EmitHint.Unspecified, jsxElement, getSourceFile(""));
-    const importText = printer.printNode(ts.EmitHint.Unspecified, componentImport, getSourceFile(""));
-
+    const importText = printer.printNode(ts.EmitHint.Unspecified, componentImport, sourceFile);
+    const updatedDefinedInText = printer.printNode(ts.EmitHint.Unspecified, updatedDefinedIn, sourceFile);
     return new Promise(resolve =>
         editor?.edit(editBuilder => {
-            editBuilder.replace(selection, jsxText);
+            editBuilder.replace(definedInSelection, ` ${updatedDefinedInText}`);
             editBuilder.insert(new vscode.Position(lastImport, 0), importText);
             resolve();
         }),

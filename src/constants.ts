@@ -9,7 +9,12 @@ export const PASCAL_CASE = "pascal case";
 export const TYPESCRIPT_PROPS_SYNTAX = "typescriptPropsSyntax";
 export const INTERFACE = "interface";
 
-export type JsxPropInitialiser = { identifier: string; args?: string[] };
+export type JsxPropInitialiser = {
+    identifier: string;
+    originalAttributeName?: string;
+    args?: string[];
+    expression?: ts.Expression;
+};
 export type JsxProp = { propName: string; type: ts.TypeNode; initialiser: JsxPropInitialiser };
 
 export const EXTRACT_REACT_COMPONENT_COMMAND = "extract-react-component.extractComponent";
