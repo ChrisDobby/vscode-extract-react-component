@@ -54,7 +54,8 @@ function getOriginalElement(jsxDefinedIn: ts.Node, jsxStartPos: number, jsxEndPo
                 return containsElement(body) ? getElement(body) : null;
             }
             case ts.SyntaxKind.FunctionDeclaration:
-            case ts.SyntaxKind.FunctionExpression: {
+            case ts.SyntaxKind.FunctionExpression:
+            case ts.SyntaxKind.MethodDeclaration: {
                 const { body } = node as ts.FunctionDeclaration;
                 return body && containsElement(body) ? getElement(body) : null;
             }
@@ -91,6 +92,14 @@ function getOriginalElement(jsxDefinedIn: ts.Node, jsxStartPos: number, jsxEndPo
             case ts.SyntaxKind.VariableDeclaration: {
                 const { initializer } = node as ts.VariableDeclaration;
                 return initializer && containsElement(initializer) ? getElement(initializer) : null;
+            }
+            case ts.SyntaxKind.IfStatement: {
+                const { thenStatement, elseStatement } = node as ts.IfStatement;
+                const [fromStatements] = (elseStatement ? [thenStatement, elseStatement] : [thenStatement])
+                    .filter(containsElement)
+                    .map(getElement)
+                    .filter(Boolean);
+                return fromStatements || null;
             }
             case ts.SyntaxKind.JsxElement: {
                 const { children } = node as ts.JsxElement;
@@ -256,6 +265,7 @@ const selectionDefiningKinds = [
     ts.SyntaxKind.FunctionDeclaration,
     ts.SyntaxKind.FunctionExpression,
     ts.SyntaxKind.ArrowFunction,
+    ts.SyntaxKind.MethodDeclaration,
 ];
 function parseOriginal(sourceFile: ts.SourceFile, typechecker: ts.TypeChecker, selection: vscode.Selection) {
     const jsxStartPos = sourceFile.getPositionOfLineAndCharacter(selection.start.line, selection.start.character);
@@ -282,10 +292,10 @@ function parseOriginal(sourceFile: ts.SourceFile, typechecker: ts.TypeChecker, s
 
             const { body } = member as ts.MethodDeclaration;
             if (!body || !body.statements) {
-                return flattenedStatement;
+                return flattenedStatement(member);
             }
 
-            return flattenedMembers.concat(...body.statements.map(flattenedStatement));
+            return flattenedMembers.concat(member).concat(...body.statements.map(flattenedStatement));
         }, [] as ts.Node[]);
     };
 
@@ -419,6 +429,7 @@ function parseOriginal(sourceFile: ts.SourceFile, typechecker: ts.TypeChecker, s
     };
 
     const flattenedStatements = ([] as ts.Node[]).concat(...sourceFile.statements.map(flattenedStatement));
+    const x = flattenedStatements.filter(isSelectionDefiningKind);
     const [jsxDefinedIn] = flattenedStatements
         .filter(isSelectionDefiningKind)
         .filter(definesTheSelection)

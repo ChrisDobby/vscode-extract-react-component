@@ -357,7 +357,8 @@ function addStatements(nodeToAddTo: ts.Node, props: JsxProp[]) {
             }
 
             case ts.SyntaxKind.FunctionDeclaration:
-            case ts.SyntaxKind.FunctionExpression: {
+            case ts.SyntaxKind.FunctionExpression:
+            case ts.SyntaxKind.MethodDeclaration: {
                 const { body } = node as ts.FunctionDeclaration;
                 return body ? getUpdatedStatements(body) : [];
             }
